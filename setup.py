@@ -6,8 +6,8 @@ with open(f"{os.path.dirname(os.path.abspath(__file__))}/requirements.txt") as r
     with open(f"{os.path.dirname(os.path.abspath(__file__))}/README.md") as readme:
         setuptools.setup(
             name="httpfs-py",
-            version="0.0.2",
-            description="written in Python",  # FIXME
+            version="0.0.3",
+            description="... written in Python",  # FIXME
             long_description=readme.read(),
             long_description_content_type="text/markdown",
             author="Vladimir Chebotarev",
@@ -40,6 +40,6 @@ with open(f"{os.path.dirname(os.path.abspath(__file__))}/requirements.txt") as r
             },
             url="https://github.com/excitoon/httpfs",
             packages=[],
-            scripts=["httpfs", "httpfs.cmd"],
+            scripts=["httpfs"],
             install_requires=requirements.read().splitlines(),
         )
