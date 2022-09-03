@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+
+import argparse
+import collections
+import errno
+import os
+import stat
+import sys
+import tempfile
+
+import fuse
+import humanize
+import requests
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("urls", nargs="+")
+args = parser.parse_args()
+
+
+class HTTPFS(fuse.Operations):
+    def __init__(self, name, urls, sizes, session, block_size):
+        self.__urls = urls
+        self.__sizes = sizes
+        self.__session = session
+        self.__block_size = block_size
+        self.__files = {
+            "/": {"st_mode": stat.S_IFDIR | 0o555, "st_nlink": 2, "st_blksize": self.__block_size},
+            f"/{name}": {
+                "st_mode": stat.S_IFREG | 0o444,
+                "st_size": sum(sizes),
+                "st_blocks": (sum(sizes) + 511) // 512,
+                "st_blksize": self.__block_size,
+            },
+        }
+        self.__cached_data = b""
+        self.__cached_offset = 0
+        self.__cached_size = 0
+
+    def getattr(self, path, fh=None):
+        if path in self.__files:
+            return self.__files[path]
+        else:
+            raise fuse.FuseOSError(errno.ENOENT)
+
+    def getxattr(self, path, name, position=0):
+        attrs = self.__files[path].get("attrs", {})
+        if name in attrs:
+            return attrs[name]
+        else:
+            return b""  # Should return ENOATTR
+
+    def listxattr(self, path):
+        attrs = self.__files[path].get("attrs", {})
+        return attrs.keys()
+
+    def read(self, path, size, offset, fh, impl=False):
+        if path == f"/{name}":
+            if self.__cached_offset <= offset < offset + size <= self.__cached_offset + self.__cached_size:
+                return self.__cached_data[offset - self.__cached_offset : offset + size - self.__cached_offset]
+
+            else:
+                if size < self.__block_size:
+                    self.__cached_data = self.read(path, self.__block_size, offset, fh)
+                    self.__cached_offset = offset
+                    self.__cached_size = self.__block_size
+                    return self.__cached_data[offset - self.__cached_offset : offset + size - self.__cached_offset]
+
+                else:
+                    result = []
+                    part_offset = 0
+
+                    for u, s in zip(self.__urls, self.__sizes):
+                        if part_offset <= offset < part_offset + s:
+                            read_size = min(size, part_offset + s - offset)
+
+                            print(f"Reading {read_size} bytes from {os.path.basename(u)}, offset {offset-part_offset}")
+                            r = self.__session.get(
+                                u, headers={"Range": f"bytes={offset-part_offset}-{offset-part_offset+read_size-1}"}
+                            )
+                            assert r.ok
+                            assert len(r.content) == read_size
+                            result.append(r.content)
+
+                            size -= read_size
+                            offset += read_size
+
+                        part_offset += s
+
+                    return b"".join(result) + b"\x00" * size
+
+        else:
+            raise fuse.FuseOSError(errno.EINVAL)
+
+    def readdir(self, path, fh):
+        return [".", ".."] + [x[1:] for x in self.__files if x != "/"]
+
+    def statfs(self, path):
+        return dict(f_bsize=512, f_blocks=(sum(sizes) + 511) // 512, f_bavail=0)
+
+
+basenames = [os.path.basename(x) for x in args.urls]
+name = os.path.commonprefix(basenames)
+sizes = []
+
+print(f"Got {len(args.urls)} parts.")
+session = requests.Session()
+for i, url in enumerate(args.urls):
+    if i in (0, len(args.urls) - 1):
+        r = session.head(url, allow_redirects=True)
+        assert r.ok
+        size = int(r.headers["Content-Length"])
+        sizes.append(size)
+        print(url, humanize.naturalsize(size, gnu=True))
+        if i == 0:
+            print("...")
+
+    else:
+        sizes.append(size)  # Assuming all blocks but last one have the same size.
+
+with tempfile.TemporaryDirectory() as d:
+    print(d)
+    fuse.FUSE(HTTPFS(name, args.urls, sizes, session, 10 * 1024 * 1024), d, foreground=True, allow_other=True)
